@@ -1,0 +1,18 @@
+{
+  "vygwQQnH3sQd35vZMNIdQNPtfs42": {
+    "userId": "vygwQQnH3sQd35vZMNIdQNPtfs42",
+    "email": "chongjun2205@gmail.com",
+    "status": "active",
+    "planId": "life-reset-monthly",
+    "planTitle": "Life Reset Unlimited Access",
+    "priceIntro": 9.99,
+    "priceRecurring": 9.99,
+    "currency": "USD",
+    "billingInterval": "month",
+    "shopifyCustomerId": "gid://shopify/Customer/31266047000851",
+    "shopifyOrderId": "gid://shopify/Order/18983428948243",
+    "createdAt": "2026-11-04T01:52:20.193Z",
+    "updatedAt": "2026-11-04T01:52:20.193Z",
+    "lastVerifiedAt": "2026-11-04T01:52:20.193Z"
+  }
+}

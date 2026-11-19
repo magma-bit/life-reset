@@ -1,0 +1,8 @@
+{
+  "name": "Life Reset",
+  "description": "The calm, science-backed productivity web app designed to overcome procrastination, clarify what matters, and build momentum every day.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

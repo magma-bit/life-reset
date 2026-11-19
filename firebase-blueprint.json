@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile and personal preferences",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "theme": { "type": "string" },
+        "soundEnabled": { "type": "boolean" },
+        "subscriptionStatus": { "type": "string" },
+        "subscription": { "type": "object" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "email"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A personal action item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "notes": { "type": "string" },
+        "category": { "type": "string" },
+        "priority": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "completed": { "type": "boolean" },
+        "completedAt": { "type": "string" },
+        "isTopPriority": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "category", "priority", "dueDate", "completed"]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "A long-term target with milestones",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "deadline": { "type": "string" },
+        "whyItMatters": { "type": "string" },
+        "milestones": { "type": "array" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "deadline"]
+    },
+    "Habit": {
+      "title": "Habit",
+      "description": "A recurring daily or weekly habit",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "frequency": { "type": "string" },
+        "completedDates": { "type": "array" },
+        "streak": { "type": "number" },
+        "bestStreak": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "frequency"]
+    },
+    "WeeklyPlan": {
+      "title": "WeeklyPlan",
+      "description": "Weekly focus and reflection blueprint",
+      "type": "object",
+      "properties": {
+        "weekId": { "type": "string" },
+        "userId": { "type": "string" },
+        "mainGoals": { "type": "array" },
+        "importantTasks": { "type": "array" },
+        "habitFocus": { "type": "array" },
+        "personalPriorities": { "type": "array" },
+        "reflection": { "type": "object" }
+      },
+      "required": ["weekId", "userId"]
+    },
+    "DailyNote": {
+      "title": "DailyNote",
+      "description": "Daily brain dump and mood note",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string" },
+        "userId": { "type": "string" },
+        "content": { "type": "string" },
+        "mood": { "type": "string" }
+      },
+      "required": ["date", "userId", "content"]
+    },
+    "FocusSession": {
+      "title": "FocusSession",
+      "description": "Logged focus block duration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "taskTitle": { "type": "string" },
+        "durationMinutes": { "type": "number" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "userId", "taskTitle", "durationMinutes"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Private conversation message with Life Reset Assistant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "userId", "role", "text"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User settings and profile document"
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Private tasks belonging to the user"
+    },
+    "/users/{userId}/goals/{goalId}": {
+      "schema": "Goal",
+      "description": "Private long term goals belonging to the user"
+    },
+    "/users/{userId}/habits/{habitId}": {
+      "schema": "Habit",
+      "description": "Private habits belonging to the user"
+    },
+    "/users/{userId}/weeklyPlans/{weekId}": {
+      "schema": "WeeklyPlan",
+      "description": "Private weekly plan belonging to the user"
+    },
+    "/users/{userId}/dailyNotes/{noteId}": {
+      "schema": "DailyNote",
+      "description": "Private daily reflections belonging to the user"
+    },
+    "/users/{userId}/focusSessions/{sessionId}": {
+      "schema": "FocusSession",
+      "description": "Private focus logs belonging to the user"
+    },
+    "/users/{userId}/chatMessages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Private assistant conversation messages belonging to the user"
+    }
+  }
+}

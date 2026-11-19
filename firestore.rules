@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny all unmapped paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Health-check / connection test document
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Root User Profile Document
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      // Prevent client from self-authorizing 'active' subscription on create
+      allow create: if isOwner(userId) && isValidId(userId) &&
+        (!('subscriptionStatus' in request.resource.data) || request.resource.data.subscriptionStatus == 'pending');
+      // Allow owner to update profile and subscription records
+      allow update: if isOwner(userId) && isValidId(userId);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Private User Tasks
+      match /tasks/{taskId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(taskId);
+      }
+
+      // Private User Goals
+      match /goals/{goalId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(goalId);
+      }
+
+      // Private User Habits
+      match /habits/{habitId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(habitId);
+      }
+
+      // Private User Weekly Plans
+      match /weeklyPlans/{weekId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(weekId);
+      }
+
+      // Private User Daily Notes
+      match /dailyNotes/{noteId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(noteId);
+      }
+
+      // Private User Focus Sessions
+      match /focusSessions/{sessionId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(sessionId);
+      }
+
+      // Private User Chat Messages
+      match /chatMessages/{messageId} {
+        allow list: if isOwner(userId);
+        allow get, create, update, delete: if isOwner(userId) && isValidId(messageId);
+      }
+    }
+  }
+}

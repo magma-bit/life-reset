@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  min-height: 100vh;
+}
+
+/* Theme variables */
+html.theme-stone {
+  --canvas-bg: #fbfbfa;
+}
+
+html.theme-slate {
+  --canvas-bg: #f8fafc;
+}
+
+html.theme-sage {
+  --canvas-bg: #f4f7f4;
+}
+
+html.theme-dark {
+  --canvas-bg: #111315;
+}
+
+:root {
+  --canvas-bg: #111315;
+}
+
+body {
+  background-color: var(--canvas-bg, #111315);
+}
+
+/* Tabular numbers for clean data and timer alignment */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.2);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.4);
+}
+
+
