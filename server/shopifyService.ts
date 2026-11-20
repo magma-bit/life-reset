@@ -1357,21 +1357,105 @@ export class ShopifyService {
     }
   }
 
+  public static readonly INITIAL_ORDER_SCAN_PAGE_SIZE = 50;
+  public static readonly INITIAL_ORDER_SCAN_MAX_PAGES = 10;
+
+  /**
+   * Normalizes a Shopify Customer GID or numeric string into its canonical numeric ID string.
+   */
+  public static normalizeCustomerId(customerId?: string | null): string {
+    return (customerId || '').trim().replace(/^gid:\/\/shopify\/Customer\//, '').trim();
+  }
+
+  /**
+   * Retrieves the server-only HMAC secret for customer binding proofs.
+   * Preferred: SUBSCRIPTION_BINDING_SECRET, fallback: SHOPIFY_API_SECRET.
+   */
+  private static getBindingSecret(): string | null {
+    const preferred = process.env.SUBSCRIPTION_BINDING_SECRET?.trim();
+    if (preferred) return preferred;
+    const fallback = process.env.SHOPIFY_API_SECRET?.trim();
+    if (fallback) return fallback;
+    return null;
+  }
+
+  /**
+   * Generates a server-side HMAC-SHA256 binding proof tying a verified Shopify Customer ID,
+   * initial subscription order ID, and billing anchor day to an authenticated Firebase UID.
+   * Payload format: "firebaseUid|normalizedShopifyCustomerId|initialOrderId|billingAnchorDay"
+   */
+  public static signCustomerBinding(params: {
+    firebaseUid: string;
+    shopifyCustomerId: string;
+    initialOrderId: string;
+    billingAnchorDay: number;
+  }): string | undefined {
+    const secret = this.getBindingSecret();
+    const uid = (params.firebaseUid || '').trim();
+    const normalizedCustomer = this.normalizeCustomerId(params.shopifyCustomerId);
+    const initialOrderId = this.formatGid(params.initialOrderId, 'Order');
+    const anchor = params.billingAnchorDay;
+
+    if (!secret || !uid || !normalizedCustomer || !initialOrderId || !Number.isInteger(anchor) || anchor < 1 || anchor > 31) {
+      return undefined;
+    }
+
+    const payload = `${uid}|${normalizedCustomer}|${initialOrderId}|${anchor}`;
+    return crypto.createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+  }
+
+  /**
+   * Verifies a stored customer binding proof using constant-time comparison.
+   * Never trusts a stored shopifyCustomerId without a valid HMAC proof.
+   */
+  public static verifyCustomerBinding(params: {
+    firebaseUid?: string | null;
+    shopifyCustomerId?: string | null;
+    initialOrderId?: string | null;
+    billingAnchorDay?: number | null;
+    proof?: string | null;
+  }): boolean {
+    const secret = this.getBindingSecret();
+    const uid = (params.firebaseUid || '').trim();
+    const normalizedCustomer = this.normalizeCustomerId(params.shopifyCustomerId);
+    const initialOrderId = params.initialOrderId ? this.formatGid(params.initialOrderId, 'Order') : '';
+    const anchor = params.billingAnchorDay;
+    const proof = (params.proof || '').trim().toLowerCase();
+
+    if (!secret || !uid || !normalizedCustomer || !initialOrderId || !anchor || !Number.isInteger(anchor) || anchor < 1 || anchor > 31) {
+      return false;
+    }
+
+    if (!/^[a-f0-9]{64}$/.test(proof)) {
+      return false;
+    }
+
+    const payload = `${uid}|${normalizedCustomer}|${initialOrderId}|${anchor}`;
+    const expectedHex = crypto.createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+    const expectedBuf = Buffer.from(expectedHex, 'hex');
+    const providedBuf = Buffer.from(proof, 'hex');
+
+    if (expectedBuf.length !== providedBuf.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(expectedBuf, providedBuf);
+  }
+
   /**
    * Server-side cryptographic & API verification directly with Shopify Admin API.
    * Supports:
-   * - Phase 2: Recurring order verification using verified shopifyCustomerId from Firestore.
-   * - Phase 1: Initial order verification using Firebase UID in order custom attributes.
-   * Requirements:
-   * 1. Direct outbound call to Shopify Admin API.
-   * 2. Strict selling plan ID: gid://shopify/SellingPlan/692445053203.
-   * 3. Financial status PAID and non-cancelled/non-refunded.
-   * 4. Recurring orders matched strictly by shopifyCustomerId without requiring Firebase UID or matching by email.
+   * - HMAC-verified customer ownership before trusting stored shopifyCustomerId
+   * - Phase 2: Recurring order verification using cryptographically bound shopifyCustomerId
+   * - Phase 1 & Resubscription Discovery: Paginated initial-order scan (50/page, max 10 pages)
+   *   with two-hop Customer B recurring order follow-through when Cycle 1 already expired.
    */
   public static async verifyWithShopify(params: {
     userId: string;
     userEmail: string;
     shopifyCustomerId?: string;
+    initialOrderId?: string;
+    customerBindingProof?: string;
     orderOrContractId?: string;
     existingSubscriptionId?: string;
     billingAnchorDay?: number | null;
@@ -1382,6 +1466,8 @@ export class ShopifyService {
     currentPeriodEnd?: string;
     gracePeriodEnd?: string;
     billingAnchorDay?: number;
+    initialOrderId?: string;
+    customerBindingProof?: string;
     message: string;
     shopifyContractId?: string;
     shopifyOrderId?: string;
@@ -1408,7 +1494,6 @@ export class ShopifyService {
       };
     }
 
-    const cleanUserEmail = (params.userEmail || '').trim().toLowerCase();
     const cleanUserId = (params.userId || '').trim();
 
     if (!cleanUserId) {
@@ -1422,9 +1507,29 @@ export class ShopifyService {
 
     const expectedSellingPlanId = 'gid://shopify/SellingPlan/692445053203';
     const existingCustomerId = (params.shopifyCustomerId || '').trim();
-    const cleanExistingCustomer = existingCustomerId.replace(/^gid:\/\/shopify\/Customer\//, '').trim();
     const explicitOrderTarget = (params.orderOrContractId || '').trim();
     const targetId = (params.orderOrContractId || params.existingSubscriptionId || '').trim();
+
+    // Enforce server-side HMAC customer ownership proof before trusting stored shopifyCustomerId.
+    const hasValidCustomerBinding = Boolean(
+      existingCustomerId &&
+      this.verifyCustomerBinding({
+        firebaseUid: cleanUserId,
+        shopifyCustomerId: existingCustomerId,
+        initialOrderId: params.initialOrderId,
+        billingAnchorDay: params.billingAnchorDay,
+        proof: params.customerBindingProof,
+      })
+    );
+
+    if (existingCustomerId && !hasValidCustomerBinding) {
+      console.warn(`[Shopify Security] Stored shopifyCustomerId (${existingCustomerId}) for UID ${cleanUserId} lacks valid HMAC proof. Re-establishing ownership via Shopify initial order.`);
+    }
+
+    const trustedExistingCustomerId = hasValidCustomerBinding ? existingCustomerId : '';
+    const cleanTrustedExistingCustomer = this.normalizeCustomerId(trustedExistingCustomerId);
+    const trustedAnchorDay = hasValidCustomerBinding ? (params.billingAnchorDay ?? undefined) : undefined;
+    const checkedCustomerIds = new Set<string>();
 
     let hadApiOutage = false;
     let expiredRecurringFallback: {
@@ -1434,24 +1539,103 @@ export class ShopifyService {
       currentPeriodEnd?: string;
       gracePeriodEnd?: string;
       billingAnchorDay?: number;
+      initialOrderId?: string;
+      customerBindingProof?: string;
       message: string;
       shopifyContractId?: string;
       shopifyOrderId?: string;
       shopifyCustomerId?: string;
+      processedAtMs?: number;
     } | null = null;
 
-    console.log('[Shopify Diagnostics: Verification] Outbound Admin API check for UID:', cleanUserId, 'Customer ID:', existingCustomerId || 'none', 'Anchor Day:', params.billingAnchorDay || 'auto-derive', 'Target:', targetId || 'store-scan');
+    const recordExpiredFallback = (candidate: NonNullable<typeof expiredRecurringFallback>) => {
+      if (!expiredRecurringFallback) {
+        expiredRecurringFallback = candidate;
+        return;
+      }
+      const existingTs = expiredRecurringFallback.processedAtMs || 0;
+      const candidateTs = candidate.processedAtMs || 0;
+      if (candidateTs > existingTs) {
+        expiredRecurringFallback = candidate;
+      }
+    };
 
-    const resolveAnchorForOrderCustomer = (orderCustomerId?: string): number | undefined => {
-      const cleanOrderCustomer = (orderCustomerId || '').replace(/^gid:\/\/shopify\/Customer\//, '').trim();
-      const isSameCustomer = Boolean(
-        cleanExistingCustomer &&
+    console.log(
+      '[Shopify Diagnostics: Verification] Outbound Admin API check for UID:',
+      cleanUserId,
+      'Trusted Customer ID:',
+      trustedExistingCustomerId || 'none',
+      'Anchor Day:',
+      trustedAnchorDay || 'auto-derive',
+      'Target:',
+      targetId || 'store-scan'
+    );
+
+    const resolveInitialAnchorAndId = (order: any, orderCustomerId?: string): { anchor: number; initialOrderId: string } => {
+      const cleanOrderCustomer = this.normalizeCustomerId(orderCustomerId);
+      const isSameTrustedCustomer = Boolean(
+        cleanTrustedExistingCustomer &&
         cleanOrderCustomer &&
-        cleanExistingCustomer === cleanOrderCustomer
+        cleanTrustedExistingCustomer === cleanOrderCustomer
       );
-      // Only reuse previous billingAnchorDay when verified against the exact same Shopify Customer ID.
-      // A different Shopify Customer ID (resubscription under a new customer) always derives a fresh anchor.
-      return isSameCustomer ? (params.billingAnchorDay ?? undefined) : undefined;
+      const orderTs = order.processedAt || order.createdAt;
+      const derivedAnchor = new Date(orderTs).getUTCDate();
+      if (isSameTrustedCustomer && trustedAnchorDay) {
+        return {
+          anchor: trustedAnchorDay,
+          initialOrderId: params.initialOrderId || order.id,
+        };
+      }
+      // Customer B (or unproved record): always derive anchor from initial order's processedAt/createdAt
+      return {
+        anchor: derivedAnchor,
+        initialOrderId: order.id,
+      };
+    };
+
+    const buildSignedOrderResult = (paramsResult: {
+      order: any;
+      lifecycle: ReturnType<typeof ShopifyService.evaluateOrderSubscriptionLifecycle>;
+      customerId?: string;
+      initialOrderId: string;
+      message?: string;
+    }) => {
+      const anchor = paramsResult.lifecycle.billingAnchorDay;
+      const customerBindingProof = paramsResult.customerId
+        ? this.signCustomerBinding({
+            firebaseUid: cleanUserId,
+            shopifyCustomerId: paramsResult.customerId,
+            initialOrderId: paramsResult.initialOrderId,
+            billingAnchorDay: anchor,
+          })
+        : undefined;
+
+      const ts = new Date(paramsResult.order.processedAt || paramsResult.order.createdAt || 0).getTime() || 0;
+
+      return {
+        verified: true,
+        status: paramsResult.lifecycle.status,
+        hasActiveAccess: paramsResult.lifecycle.hasActiveAccess,
+        currentPeriodEnd: paramsResult.lifecycle.currentPeriodEnd,
+        gracePeriodEnd: paramsResult.lifecycle.gracePeriodEnd,
+        billingAnchorDay: anchor,
+        initialOrderId: paramsResult.initialOrderId,
+        customerBindingProof,
+        shopifyOrderId: paramsResult.order.id,
+        shopifyCustomerId: paramsResult.customerId,
+        shopifyContractId: paramsResult.order.id,
+        processedAtMs: ts,
+        message:
+          paramsResult.message ||
+          (paramsResult.lifecycle.hasActiveAccess
+            ? `Verified paid subscription order (${paramsResult.order.name || paramsResult.order.id}) with Shopify Admin API. Access valid until ${paramsResult.lifecycle.currentPeriodEnd}.`
+            : `Subscription period and 72-hour grace period expired on ${paramsResult.lifecycle.gracePeriodEnd} without renewal.`),
+      };
+    };
+
+    const stripInternalMeta = (res: NonNullable<typeof expiredRecurringFallback>) => {
+      const { processedAtMs: _ignored, ...cleanRes } = res;
+      return cleanRes;
     };
 
     // -------------------------------------------------------------------------
@@ -1510,24 +1694,67 @@ export class ShopifyService {
 
         if (order && this.isVerifiedSubscriptionOrder(order, cleanUserId, expectedSellingPlanId)) {
           const orderCustomerId = await this.getCustomerIdForOrder(order.id);
-          const effectiveAnchor = resolveAnchorForOrderCustomer(orderCustomerId);
-          const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), effectiveAnchor);
+          const { anchor, initialOrderId } = resolveInitialAnchorAndId(order, orderCustomerId);
+          const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), anchor);
+
           if (lifecycle.eligible) {
-            console.log(`[Shopify Phase 1] Verified explicit targeted order ${order.id} for UID ${cleanUserId}. Customer ID: ${orderCustomerId || 'none'}, status: ${lifecycle.status}, hasActiveAccess: ${lifecycle.hasActiveAccess}, anchor: ${lifecycle.billingAnchorDay}`);
-            return {
-              verified: true,
-              status: lifecycle.status,
-              hasActiveAccess: lifecycle.hasActiveAccess,
-              currentPeriodEnd: lifecycle.currentPeriodEnd,
-              gracePeriodEnd: lifecycle.gracePeriodEnd,
-              billingAnchorDay: lifecycle.billingAnchorDay,
-              shopifyOrderId: order.id,
-              shopifyCustomerId: orderCustomerId,
-              shopifyContractId: order.id,
-              message: lifecycle.hasActiveAccess
-                ? `Verified paid subscription order (${order.name || order.id}) with Shopify Admin API. Access valid until ${lifecycle.currentPeriodEnd}.`
-                : `Subscription period and 72-hour grace period expired on ${lifecycle.gracePeriodEnd} without renewal.`,
-            };
+            if (lifecycle.hasActiveAccess) {
+              console.log(`[Shopify Phase 1] Verified explicit targeted order ${order.id} for UID ${cleanUserId}. Customer ID: ${orderCustomerId || 'none'}, anchor: ${lifecycle.billingAnchorDay}`);
+              return stripInternalMeta(buildSignedOrderResult({
+                order,
+                lifecycle,
+                customerId: orderCustomerId,
+                initialOrderId,
+              }));
+            }
+
+            // Explicit initial order was eligible but its Cycle 1 expired: follow through to Customer ID's recurring orders
+            const cleanCust = this.normalizeCustomerId(orderCustomerId);
+            if (orderCustomerId && cleanCust && !checkedCustomerIds.has(cleanCust)) {
+              checkedCustomerIds.add(cleanCust);
+              const followUp = await this.verifyCustomerRecurringOrders({
+                shopifyCustomerId: orderCustomerId,
+                expectedSellingPlanId,
+                billingAnchorDay: lifecycle.billingAnchorDay,
+              });
+              if (followUp.error) {
+                hadApiOutage = true;
+              } else if (followUp.verified && followUp.order) {
+                const followUpAnchor = followUp.billingAnchorDay ?? lifecycle.billingAnchorDay;
+                const followUpProof = this.signCustomerBinding({
+                  firebaseUid: cleanUserId,
+                  shopifyCustomerId: orderCustomerId,
+                  initialOrderId,
+                  billingAnchorDay: followUpAnchor,
+                });
+                const followUpRes = {
+                  verified: true,
+                  status: followUp.status,
+                  hasActiveAccess: followUp.hasActiveAccess,
+                  currentPeriodEnd: followUp.currentPeriodEnd,
+                  gracePeriodEnd: followUp.gracePeriodEnd,
+                  billingAnchorDay: followUpAnchor,
+                  initialOrderId,
+                  customerBindingProof: followUpProof,
+                  shopifyOrderId: followUp.shopifyOrderId || followUp.order.id,
+                  shopifyCustomerId: followUp.shopifyCustomerId || orderCustomerId,
+                  shopifyContractId: followUp.shopifyOrderId || followUp.order.id,
+                  processedAtMs: new Date(followUp.order.processedAt || followUp.order.createdAt || 0).getTime() || 0,
+                  message: followUp.message || `Verified recurring subscription order for customer ${orderCustomerId}.`,
+                };
+                if (followUp.hasActiveAccess) {
+                  return stripInternalMeta(followUpRes);
+                }
+                recordExpiredFallback(followUpRes);
+              } else {
+                recordExpiredFallback(buildSignedOrderResult({
+                  order,
+                  lifecycle,
+                  customerId: orderCustomerId,
+                  initialOrderId,
+                }));
+              }
+            }
           }
         }
       } catch (err: any) {
@@ -1537,13 +1764,14 @@ export class ShopifyService {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 2 & Phase 3: Recurring Subscription Order Verification via saved shopifyCustomerId
+    // Phase 2 & Phase 3: Recurring Subscription Order Verification via HMAC-verified shopifyCustomerId
     // -------------------------------------------------------------------------
-    if (existingCustomerId) {
+    if (trustedExistingCustomerId) {
+      checkedCustomerIds.add(cleanTrustedExistingCustomer);
       const recurringVerification = await this.verifyCustomerRecurringOrders({
-        shopifyCustomerId: existingCustomerId,
+        shopifyCustomerId: trustedExistingCustomerId,
         expectedSellingPlanId,
-        billingAnchorDay: params.billingAnchorDay,
+        billingAnchorDay: trustedAnchorDay,
       });
 
       if (recurringVerification.error) {
@@ -1551,24 +1779,39 @@ export class ShopifyService {
       }
 
       if (recurringVerification.verified && recurringVerification.order) {
+        const resolvedAnchor =
+          recurringVerification.billingAnchorDay ??
+          trustedAnchorDay ??
+          new Date(recurringVerification.order.processedAt || recurringVerification.order.createdAt).getUTCDate();
+        const resolvedInitialId = params.initialOrderId || recurringVerification.order.id;
+        const bindingProof = this.signCustomerBinding({
+          firebaseUid: cleanUserId,
+          shopifyCustomerId: trustedExistingCustomerId,
+          initialOrderId: resolvedInitialId,
+          billingAnchorDay: resolvedAnchor,
+        });
+
         const resultObj = {
           verified: true,
           status: recurringVerification.status,
           hasActiveAccess: recurringVerification.hasActiveAccess,
           currentPeriodEnd: recurringVerification.currentPeriodEnd,
           gracePeriodEnd: recurringVerification.gracePeriodEnd,
-          billingAnchorDay: recurringVerification.billingAnchorDay,
+          billingAnchorDay: resolvedAnchor,
+          initialOrderId: resolvedInitialId,
+          customerBindingProof: bindingProof,
           shopifyOrderId: recurringVerification.shopifyOrderId || recurringVerification.order.id,
-          shopifyCustomerId: recurringVerification.shopifyCustomerId || existingCustomerId,
+          shopifyCustomerId: recurringVerification.shopifyCustomerId || trustedExistingCustomerId,
           shopifyContractId: recurringVerification.shopifyOrderId || recurringVerification.order.id,
-          message: recurringVerification.message || `Verified recurring subscription order for customer ${existingCustomerId}.`,
+          processedAtMs: new Date(recurringVerification.order.processedAt || recurringVerification.order.createdAt || 0).getTime() || 0,
+          message: recurringVerification.message || `Verified recurring subscription order for customer ${trustedExistingCustomerId}.`,
         };
 
         if (recurringVerification.hasActiveAccess) {
-          return resultObj;
+          return stripInternalMeta(resultObj);
         }
-        // If previous customer ID's order is expired, hold as fallback while checking if user resubscribed under a different customer ID
-        expiredRecurringFallback = resultObj;
+        // Customer A's subscription expired: retain as fallback while scanning for a newer resubscription under Customer B
+        recordExpiredFallback(resultObj);
       }
     }
 
@@ -1630,30 +1873,19 @@ export class ShopifyService {
 
           if (order && this.isVerifiedSubscriptionOrder(order, cleanUserId, expectedSellingPlanId)) {
             const customerId = await this.getCustomerIdForOrder(order.id);
-            const effectiveAnchor = resolveAnchorForOrderCustomer(customerId);
-            const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), effectiveAnchor);
+            const { anchor, initialOrderId } = resolveInitialAnchorAndId(order, customerId);
+            const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), anchor);
             if (lifecycle.eligible) {
-              console.log(`[Shopify Phase 1] Verified targeted paid subscription order ${order.id} for UID ${cleanUserId}. Customer ID: ${customerId || 'none'}, status: ${lifecycle.status}, hasActiveAccess: ${lifecycle.hasActiveAccess}, anchor: ${lifecycle.billingAnchorDay}`);
-              const resultObj = {
-                verified: true,
-                status: lifecycle.status,
-                hasActiveAccess: lifecycle.hasActiveAccess,
-                currentPeriodEnd: lifecycle.currentPeriodEnd,
-                gracePeriodEnd: lifecycle.gracePeriodEnd,
-                billingAnchorDay: lifecycle.billingAnchorDay,
-                shopifyOrderId: order.id,
-                shopifyCustomerId: customerId,
-                shopifyContractId: order.id,
-                message: lifecycle.hasActiveAccess
-                  ? `Verified paid subscription order (${order.name || order.id}) with Shopify Admin API. Access valid until ${lifecycle.currentPeriodEnd}.`
-                  : `Subscription period and 72-hour grace period expired on ${lifecycle.gracePeriodEnd} without renewal.`,
-              };
+              const resultObj = buildSignedOrderResult({
+                order,
+                lifecycle,
+                customerId,
+                initialOrderId,
+              });
               if (lifecycle.hasActiveAccess) {
-                return resultObj;
+                return stripInternalMeta(resultObj);
               }
-              if (!expiredRecurringFallback) {
-                expiredRecurringFallback = resultObj;
-              }
+              recordExpiredFallback(resultObj);
             }
           }
         } catch (err: any) {
@@ -1664,13 +1896,19 @@ export class ShopifyService {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 1 - Order Verification Step B: Scan Recent Paid Orders for Verified UID & Selling Plan
+    // Phase 1 & Resubscription Discovery - Step B:
+    // Paginated newest-first scan (50/page, max 10 pages = 500 orders) + Two-Hop Customer B Follow-Through
     // -------------------------------------------------------------------------
     try {
       const recentOrdersQuery = `
-        query getRecentSubscriptionOrders {
-          orders(first: 25, reverse: true) {
+        query getRecentSubscriptionOrders($after: String) {
+          orders(first: ${ShopifyService.INITIAL_ORDER_SCAN_PAGE_SIZE}, reverse: true, after: $after) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             edges {
+              cursor
               node {
                 id
                 name
@@ -1716,40 +1954,117 @@ export class ShopifyService {
         }
       `;
 
-      const listRes = await this.queryAdminGraphQL(recentOrdersQuery);
-      const orderEdges = listRes?.orders?.edges || [];
+      let hasNextPage = true;
+      let endCursor: string | null = null;
+      let pageCount = 0;
 
-      for (const edge of orderEdges) {
-        const order = edge?.node;
-        if (!order) continue;
+      while (hasNextPage && pageCount < ShopifyService.INITIAL_ORDER_SCAN_MAX_PAGES) {
+        pageCount++;
+        const listRes = await this.queryAdminGraphQL(recentOrdersQuery, { after: endCursor });
+        const pageInfo = listRes?.orders?.pageInfo;
+        const orderEdges = listRes?.orders?.edges || [];
 
-        if (this.isVerifiedSubscriptionOrder(order, cleanUserId, expectedSellingPlanId)) {
-          const customerId = await this.getCustomerIdForOrder(order.id);
-          const effectiveAnchor = resolveAnchorForOrderCustomer(customerId);
-          const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), effectiveAnchor);
-          if (lifecycle.eligible) {
-            console.log(`[Shopify Phase 1] Verified subscription order from store scan ${order.id} (${order.name}) for UID ${cleanUserId}. Customer ID: ${customerId || 'none'}, status: ${lifecycle.status}, hasActiveAccess: ${lifecycle.hasActiveAccess}, anchor: ${lifecycle.billingAnchorDay}`);
-            const resultObj = {
-              verified: true,
-              status: lifecycle.status,
-              hasActiveAccess: lifecycle.hasActiveAccess,
-              currentPeriodEnd: lifecycle.currentPeriodEnd,
-              gracePeriodEnd: lifecycle.gracePeriodEnd,
+        for (const edge of orderEdges) {
+          const order = edge?.node;
+          if (!order) continue;
+
+          // Filter strictly by Firebase UID custom attribute + selling plan + payment/refund/chargeback state
+          // BEFORE making any additional REST requests for customer identity.
+          if (!this.isVerifiedSubscriptionOrder(order, cleanUserId, expectedSellingPlanId)) {
+            continue;
+          }
+
+          // Two-Hop Discovery Step 1: Resolve Shopify Customer ID via getCustomerIdForOrder()
+          const discoveredCustomerId = await this.getCustomerIdForOrder(order.id);
+          const cleanDiscoveredCustomer = this.normalizeCustomerId(discoveredCustomerId);
+
+          // Two-Hop Discovery Step 2 & 3: Derive billing anchor from initial order's processedAt (fallback createdAt)
+          // and evaluate initial order lifecycle using that anchor.
+          const { anchor: initialAnchorDay, initialOrderId } = resolveInitialAnchorAndId(order, discoveredCustomerId);
+          const lifecycle = this.evaluateOrderSubscriptionLifecycle(order, Date.now(), initialAnchorDay);
+
+          if (!lifecycle.eligible) {
+            continue;
+          }
+
+          // Two-Hop Discovery Step 4: If active or within grace, return immediately with signed binding proof
+          if (lifecycle.hasActiveAccess) {
+            console.log(
+              `[Shopify Phase 1] Verified subscription order from store scan (page ${pageCount}) ${order.id} (${order.name}) for UID ${cleanUserId}. Customer ID: ${discoveredCustomerId || 'none'}, anchor: ${lifecycle.billingAnchorDay}`
+            );
+            return stripInternalMeta(buildSignedOrderResult({
+              order,
+              lifecycle,
+              customerId: discoveredCustomerId,
+              initialOrderId,
+            }));
+          }
+
+          // Two-Hop Discovery Step 5 & 6: Initial order is financially eligible but Cycle 1 expired.
+          // Immediately inspect recurring orders for the newly discovered Customer ID using initial order's anchor.
+          if (discoveredCustomerId && cleanDiscoveredCustomer && !checkedCustomerIds.has(cleanDiscoveredCustomer)) {
+            checkedCustomerIds.add(cleanDiscoveredCustomer);
+            console.log(
+              `[Shopify Two-Hop Discovery] Initial order ${order.id} (page ${pageCount}) expired on ${lifecycle.gracePeriodEnd}; checking recurring orders for Customer ${discoveredCustomerId} with anchor ${lifecycle.billingAnchorDay}`
+            );
+
+            const followUp = await this.verifyCustomerRecurringOrders({
+              shopifyCustomerId: discoveredCustomerId,
+              expectedSellingPlanId,
               billingAnchorDay: lifecycle.billingAnchorDay,
-              shopifyOrderId: order.id,
-              shopifyCustomerId: customerId,
-              shopifyContractId: order.id,
-              message: lifecycle.hasActiveAccess
-                ? `Verified paid subscription order (${order.name || order.id}) with Shopify Admin API. Access valid until ${lifecycle.currentPeriodEnd}.`
-                : `Subscription period and 72-hour grace period expired on ${lifecycle.gracePeriodEnd} without renewal.`,
-            };
-            if (lifecycle.hasActiveAccess) {
-              return resultObj;
-            }
-            if (!expiredRecurringFallback) {
-              expiredRecurringFallback = resultObj;
+            });
+
+            if (followUp.error) {
+              hadApiOutage = true;
+            } else if (followUp.verified && followUp.order) {
+              const followUpAnchor = followUp.billingAnchorDay ?? lifecycle.billingAnchorDay;
+              const followUpProof = this.signCustomerBinding({
+                firebaseUid: cleanUserId,
+                shopifyCustomerId: discoveredCustomerId,
+                initialOrderId,
+                billingAnchorDay: followUpAnchor,
+              });
+
+              const followUpResult = {
+                verified: true,
+                status: followUp.status,
+                hasActiveAccess: followUp.hasActiveAccess,
+                currentPeriodEnd: followUp.currentPeriodEnd,
+                gracePeriodEnd: followUp.gracePeriodEnd,
+                billingAnchorDay: followUpAnchor,
+                initialOrderId,
+                customerBindingProof: followUpProof,
+                shopifyOrderId: followUp.shopifyOrderId || followUp.order.id,
+                shopifyCustomerId: followUp.shopifyCustomerId || discoveredCustomerId,
+                shopifyContractId: followUp.shopifyOrderId || followUp.order.id,
+                processedAtMs: new Date(followUp.order.processedAt || followUp.order.createdAt || 0).getTime() || 0,
+                message: followUp.message || `Verified recurring subscription order for Customer ${discoveredCustomerId}.`,
+              };
+
+              if (followUp.hasActiveAccess) {
+                console.log(
+                  `[Shopify Two-Hop Discovery] Granted active access via Customer ${discoveredCustomerId} recurring order ${followUpResult.shopifyOrderId} (initialOrderId=${initialOrderId}, anchor=${followUpAnchor})`
+                );
+                return stripInternalMeta(followUpResult);
+              }
+
+              recordExpiredFallback(followUpResult);
+              continue;
             }
           }
+
+          recordExpiredFallback(buildSignedOrderResult({
+            order,
+            lifecycle,
+            customerId: discoveredCustomerId,
+            initialOrderId,
+          }));
+        }
+
+        hasNextPage = Boolean(pageInfo?.hasNextPage);
+        endCursor = pageInfo?.endCursor || null;
+        if (!hasNextPage || !endCursor) {
+          break;
         }
       }
     } catch (err: any) {
@@ -1807,10 +2122,6 @@ export class ShopifyService {
       }
     }
 
-    if (expiredRecurringFallback && !hadApiOutage) {
-      return expiredRecurringFallback;
-    }
-
     if (hadApiOutage) {
       console.warn(`[Shopify Diagnostics: Verification] UID ${cleanUserId}: Shopify Admin API unreachable during verification.`);
       return {
@@ -1820,6 +2131,10 @@ export class ShopifyService {
         hasActiveAccess: false,
         message: 'Shopify Admin API is currently unreachable. Cached access cannot be extended without live verification.',
       };
+    }
+
+    if (expiredRecurringFallback) {
+      return stripInternalMeta(expiredRecurringFallback);
     }
 
     console.log(`[Shopify Diagnostics: Verification] UID ${cleanUserId}: No verified paid subscription order or active contract found.`);

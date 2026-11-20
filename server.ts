@@ -217,6 +217,8 @@ app.get('/api/subscription/status', requireAuth, async (req, res) => {
         userId: user.uid,
         userEmail: user.email,
         shopifyCustomerId: record?.shopifyCustomerId || undefined,
+        initialOrderId: record?.initialOrderId || undefined,
+        customerBindingProof: record?.customerBindingProof || undefined,
         existingSubscriptionId: record?.shopifySubscriptionId || undefined,
         billingAnchorDay: record?.billingAnchorDay || undefined,
       });
@@ -241,6 +243,8 @@ app.get('/api/subscription/status', requireAuth, async (req, res) => {
             shopifySubscriptionId: verification.shopifyContractId || (isDifferentCustomer ? undefined : record?.shopifySubscriptionId) || undefined,
             shopifyOrderId: verification.shopifyOrderId || (isDifferentCustomer ? undefined : record?.shopifyOrderId) || undefined,
             shopifyCustomerId: verification.shopifyCustomerId || record?.shopifyCustomerId || undefined,
+            initialOrderId: verification.initialOrderId || (isDifferentCustomer ? undefined : record?.initialOrderId) || undefined,
+            customerBindingProof: verification.customerBindingProof || (isDifferentCustomer ? undefined : record?.customerBindingProof) || undefined,
             billingAnchorDay: isDifferentCustomer
               ? verification.billingAnchorDay
               : (verification.billingAnchorDay || record?.billingAnchorDay || undefined),
@@ -307,6 +311,21 @@ app.get('/api/subscription/status', requireAuth, async (req, res) => {
 
   console.log('[Shopify Diagnostics: Access Status] Evaluated for UID:', user.uid, 'hasActiveAccess:', hasActiveAccess, 'status:', status, 'apiOutage:', apiOutage);
 
+  const sanitizedSubscription = record
+    ? (() => {
+        const { customerBindingProof: _hiddenProof, ...safeRecord } = record;
+        return { ...safeRecord, status };
+      })()
+    : {
+        status,
+        planId: 'life-reset-monthly',
+        planTitle: 'Life Reset Full Access',
+        priceIntro: 9.99,
+        priceRecurring: 9.99,
+        currency: 'USD',
+        billingInterval: 'month',
+      };
+
   return res.json({
     authenticated: true,
     userId: user.uid,
@@ -319,15 +338,7 @@ app.get('/api/subscription/status', requireAuth, async (req, res) => {
     currentPeriodEnd: record?.currentPeriodEnd || null,
     gracePeriodEnd: record?.gracePeriodEnd || null,
     lastPaidOrderId: record?.lastPaidOrderId || record?.shopifyOrderId || null,
-    subscription: record ? { ...record, status } : {
-      status,
-      planId: 'life-reset-monthly',
-      planTitle: 'Life Reset Full Access',
-      priceIntro: 9.99,
-      priceRecurring: 9.99,
-      currency: 'USD',
-      billingInterval: 'month',
-    },
+    subscription: sanitizedSubscription,
     shopifyConfigured: shopifyConfig.configured,
     missingShopifyConfig: shopifyConfig.missing,
     verificationMode: 'outbound_api',
@@ -383,6 +394,8 @@ app.post('/api/subscription/verify', requireAuth, async (req, res) => {
       userId: user.uid,
       userEmail: user.email,
       shopifyCustomerId: record?.shopifyCustomerId || undefined,
+      initialOrderId: record?.initialOrderId || undefined,
+      customerBindingProof: record?.customerBindingProof || undefined,
       orderOrContractId,
       existingSubscriptionId: record?.shopifySubscriptionId || undefined,
       billingAnchorDay: record?.billingAnchorDay || undefined,
@@ -416,6 +429,8 @@ app.post('/api/subscription/verify', requireAuth, async (req, res) => {
         shopifySubscriptionId: verification.shopifyContractId || (isDifferentCustomer ? undefined : record?.shopifySubscriptionId) || undefined,
         shopifyOrderId: verification.shopifyOrderId || (isDifferentCustomer ? undefined : record?.shopifyOrderId) || undefined,
         shopifyCustomerId: verification.shopifyCustomerId || record?.shopifyCustomerId || undefined,
+        initialOrderId: verification.initialOrderId || (isDifferentCustomer ? undefined : record?.initialOrderId) || undefined,
+        customerBindingProof: verification.customerBindingProof || (isDifferentCustomer ? undefined : record?.customerBindingProof) || undefined,
         billingAnchorDay: isDifferentCustomer
           ? verification.billingAnchorDay
           : (verification.billingAnchorDay || record?.billingAnchorDay || undefined),

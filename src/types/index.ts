@@ -99,6 +99,8 @@ export interface UserSubscription {
   lastPaidOrderId?: string | null;
   cancelAtPeriodEnd?: boolean;
   shopifyCustomerId?: string | null;
+  initialOrderId?: string | null;
+  customerBindingProof?: string | null;
   shopifySubscriptionId?: string | null;
   shopifyOrderId?: string | null;
   checkoutUrl?: string | null;

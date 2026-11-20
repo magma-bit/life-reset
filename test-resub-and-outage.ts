@@ -33,6 +33,10 @@ async function runTests() {
   const originalGetConfig = ShopifyService.getConfigStatus;
   const originalQueryGraphQL = ShopifyService.queryAdminGraphQL;
   const originalGetCustomerId = ShopifyService.getCustomerIdForOrder;
+  const originalBindingSecret = process.env.SUBSCRIPTION_BINDING_SECRET;
+  if (!process.env.SUBSCRIPTION_BINDING_SECRET && !process.env.SHOPIFY_API_SECRET) {
+    process.env.SUBSCRIPTION_BINDING_SECRET = 'test-binding-secret-for-unit-suite';
+  }
 
   const testUid = 'test-resub-outage-uid';
 
@@ -271,10 +275,20 @@ async function runTests() {
       });
       (ShopifyService as any).getCustomerIdForOrder = async () => 'gid://shopify/Customer/111';
 
+      const initialOrderId = 'gid://shopify/Order/900001';
+      const proof = ShopifyService.signCustomerBinding({
+        firebaseUid: testUid,
+        shopifyCustomerId: 'gid://shopify/Customer/111',
+        initialOrderId,
+        billingAnchorDay: 31,
+      });
+
       const res = await ShopifyService.verifyWithShopify({
         userId: testUid,
         userEmail: 'test@example.com',
         shopifyCustomerId: 'gid://shopify/Customer/111',
+        initialOrderId,
+        customerBindingProof: proof,
         billingAnchorDay: 31,
       });
 
@@ -475,6 +489,11 @@ async function runTests() {
     (ShopifyService as any).getConfigStatus = originalGetConfig;
     (ShopifyService as any).queryAdminGraphQL = originalQueryGraphQL;
     (ShopifyService as any).getCustomerIdForOrder = originalGetCustomerId;
+    if (originalBindingSecret === undefined) {
+      delete process.env.SUBSCRIPTION_BINDING_SECRET;
+    } else {
+      process.env.SUBSCRIPTION_BINDING_SECRET = originalBindingSecret;
+    }
 
     (subscriptionStore as any).records.clear();
     if (originalDiskContent !== null) {

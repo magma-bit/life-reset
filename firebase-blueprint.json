@@ -10,8 +10,8 @@
         "displayName": { "type": "string" },
         "theme": { "type": "string" },
         "soundEnabled": { "type": "boolean" },
-        "subscriptionStatus": { "type": "string" },
-        "subscription": { "type": "object" },
+        "subscriptionStatus": { "type": "string", "description": "Authoritative subscription status" },
+        "subscription": { "type": "object", "description": "Subscription metadata including shopifyCustomerId, initialOrderId, customerBindingProof, billingAnchorDay, currentPeriodEnd, gracePeriodEnd, lastPaidOrderId, and lastVerifiedAt" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },

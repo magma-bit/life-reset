@@ -116,6 +116,12 @@ class SubscriptionStore {
       if (record.shopifyCustomerId) {
         subscriptionFields.shopifyCustomerId = { stringValue: record.shopifyCustomerId };
       }
+      if (record.initialOrderId) {
+        subscriptionFields.initialOrderId = { stringValue: record.initialOrderId };
+      }
+      if (record.customerBindingProof) {
+        subscriptionFields.customerBindingProof = { stringValue: record.customerBindingProof };
+      }
       if (record.lastVerifiedAt) {
         subscriptionFields.lastVerifiedAt = { stringValue: record.lastVerifiedAt };
       }
@@ -190,6 +196,8 @@ class SubscriptionStore {
         gracePeriodEnd: subMap.gracePeriodEnd?.stringValue,
         lastPaidOrderId: subMap.lastPaidOrderId?.stringValue || subMap.shopifyOrderId?.stringValue,
         shopifyCustomerId: subMap.shopifyCustomerId?.stringValue,
+        initialOrderId: subMap.initialOrderId?.stringValue,
+        customerBindingProof: subMap.customerBindingProof?.stringValue,
         shopifySubscriptionId: subMap.shopifySubscriptionId?.stringValue,
         shopifyOrderId: subMap.shopifyOrderId?.stringValue,
         createdAt: fields.createdAt?.stringValue || new Date().toISOString(),
@@ -301,6 +309,29 @@ class SubscriptionStore {
       ? patch?.billingAnchorDay
       : (patch?.billingAnchorDay !== undefined ? patch.billingAnchorDay : existing?.billingAnchorDay);
 
+    const anchorChanged = Boolean(
+      existing?.billingAnchorDay !== undefined &&
+      existing?.billingAnchorDay !== null &&
+      resolvedAnchorDay !== undefined &&
+      resolvedAnchorDay !== null &&
+      existing.billingAnchorDay !== resolvedAnchorDay
+    );
+
+    const resolvedInitialOrderId = patch?.initialOrderId !== undefined
+      ? patch.initialOrderId
+      : (customerChanged ? undefined : existing?.initialOrderId);
+
+    const initialOrderChanged = Boolean(
+      existing?.initialOrderId &&
+      resolvedInitialOrderId &&
+      existing.initialOrderId !== resolvedInitialOrderId
+    );
+
+    const bindingChanged = customerChanged || anchorChanged || initialOrderChanged;
+    const resolvedBindingProof = patch?.customerBindingProof !== undefined
+      ? patch.customerBindingProof
+      : (bindingChanged ? undefined : existing?.customerBindingProof);
+
     const updated: ServerSubscriptionRecord = {
       userId,
       email: patch?.email || existing?.email || '',
@@ -324,6 +355,8 @@ class SubscriptionStore {
       lastVerifiedAt: now,
       ...patch,
       billingAnchorDay: resolvedAnchorDay,
+      initialOrderId: resolvedInitialOrderId,
+      customerBindingProof: resolvedBindingProof,
     };
 
     this.records.set(userId, updated);

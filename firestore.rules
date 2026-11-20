@@ -18,6 +18,71 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function hasNoRestrictedSubscriptionFields(sub) {
+      return !sub.keys().hasAny([
+        'shopifyCustomerId',
+        'initialOrderId',
+        'customerBindingProof',
+        'billingAnchorDay',
+        'currentPeriodEnd',
+        'gracePeriodEnd',
+        'lastPaidOrderId',
+        'lastVerifiedAt',
+        'shopifySubscriptionId',
+        'shopifyOrderId'
+      ]);
+    }
+
+    function isValidProfileSettingsUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return changed.hasOnly(['displayName', 'theme', 'soundEnabled', 'updatedAt'])
+        && (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100))
+        && (!('theme' in request.resource.data) || (request.resource.data.theme is string && request.resource.data.theme.size() <= 32))
+        && (!('soundEnabled' in request.resource.data) || request.resource.data.soundEnabled is bool)
+        && (!('updatedAt' in request.resource.data) || (request.resource.data.updatedAt is string && request.resource.data.updatedAt.size() <= 64));
+    }
+
+    function isValidInitialPendingSubscriptionInit() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return !('subscriptionStatus' in resource.data)
+        && changed.hasOnly(['subscriptionStatus', 'subscription'])
+        && request.resource.data.subscriptionStatus == 'pending'
+        && request.resource.data.subscription is map
+        && request.resource.data.subscription.status == 'pending'
+        && hasNoRestrictedSubscriptionFields(request.resource.data.subscription);
+    }
+
+    function isValidSubscriptionSyncPayload() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let sub = request.resource.data.subscription;
+      let hasCust = 'shopifyCustomerId' in sub
+        && sub.shopifyCustomerId is string
+        && sub.shopifyCustomerId.size() > 0
+        && sub.shopifyCustomerId.size() <= 128;
+      let hasValidProof = 'initialOrderId' in sub
+        && sub.initialOrderId is string
+        && sub.initialOrderId.size() > 0
+        && sub.initialOrderId.size() <= 128
+        && 'customerBindingProof' in sub
+        && sub.customerBindingProof is string
+        && sub.customerBindingProof.matches('^[a-f0-9]{64}$');
+      let validAnchor = !('billingAnchorDay' in sub)
+        || (sub.billingAnchorDay is int && sub.billingAnchorDay >= 1 && sub.billingAnchorDay <= 31);
+      return changed.hasOnly(['subscriptionStatus', 'subscription', 'updatedAt'])
+        && request.resource.data.subscriptionStatus in ['pending', 'active', 'cancelled', 'expired', 'paused']
+        && sub is map
+        && sub.keys().hasOnly([
+          'status', 'planId', 'planTitle', 'priceIntro', 'priceRecurring',
+          'currency', 'billingInterval', 'updatedAt', 'billingAnchorDay',
+          'currentPeriodEnd', 'gracePeriodEnd', 'lastPaidOrderId',
+          'shopifySubscriptionId', 'shopifyOrderId', 'shopifyCustomerId',
+          'initialOrderId', 'customerBindingProof', 'lastVerifiedAt'
+        ])
+        && sub.status == request.resource.data.subscriptionStatus
+        && validAnchor
+        && (!hasCust || request.resource.data.subscriptionStatus == 'expired' || hasValidProof);
+    }
+
     // Health-check / connection test document
     match /test/connection {
       allow read: if true;
@@ -27,12 +92,27 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isOwner(userId) && isValidId(userId);
       allow list: if false;
-      // Prevent client from self-authorizing 'active' subscription on create
-      allow create: if isOwner(userId) && isValidId(userId) &&
-        (!('subscriptionStatus' in request.resource.data) || request.resource.data.subscriptionStatus == 'pending');
-      // Allow owner to update profile and subscription records
-      allow update: if isOwner(userId) && isValidId(userId);
-      allow delete: if isOwner(userId) && isValidId(userId);
+      // Prevent client from self-authorizing active subscription or setting Shopify ownership/billing fields on create
+      allow create: if isOwner(userId) && isValidId(userId)
+        && (!('userId' in request.resource.data) || request.resource.data.userId == userId)
+        && (!('subscriptionStatus' in request.resource.data) || request.resource.data.subscriptionStatus == 'pending')
+        && (!('subscription' in request.resource.data) || (
+          request.resource.data.subscription is map
+          && request.resource.data.subscription.status == 'pending'
+          && hasNoRestrictedSubscriptionFields(request.resource.data.subscription)
+        ));
+      // Partition updates: ordinary profile settings vs pending placeholder init vs validated server ID-token sync
+      // (Server still verifies HMAC customerBindingProof before trusting any stored shopifyCustomerId)
+      allow update: if isOwner(userId) && isValidId(userId)
+        && (!('userId' in resource.data) || request.resource.data.userId == resource.data.userId)
+        && (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt)
+        && (!('email' in resource.data) || request.resource.data.email == resource.data.email)
+        && (
+          isValidProfileSettingsUpdate()
+          || isValidInitialPendingSubscriptionInit()
+          || isValidSubscriptionSyncPayload()
+        );
+      allow delete: if false;
 
       // Private User Tasks
       match /tasks/{taskId} {
